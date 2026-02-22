@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <video src=".github/video.mp4" controls muted width="100%"></video>
+  <video src="https://github.com/user-attachments/assets/dd6ab24f-04b2-4472-95a0-041aed496d44" controls muted width="100%"></video>
 </p>
 
 Favicons in your Quickshell bar or dock.
