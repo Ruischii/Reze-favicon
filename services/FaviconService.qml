@@ -57,24 +57,14 @@ Singleton {
     property var failedDomains: ({}) // Let's not bang our head against a wall if a site is down
     property int cacheCounter: 0     // A little poke to tell the UI to refresh
  
-    // High-quality icons we shipped in assets/google/
-    readonly property var officialDomains: [
-        "mail.google.com", "calendar.google.com", "drive.google.com", 
-        "docs.google.com", "sheets.google.com", "slides.google.com",
-        "meet.google.com", "maps.google.com", "gemini.google.com",
-        "youtube.com", "aistudio.google.com", "notebooklm.google.com",
-        "photos.google.com", "m3.material.io"
-    ]
-
     signal faviconDownloaded(string domain)
 
     /**
-     * The magic function that finds your icons!
-     * It tries a few tricks in order:
-     * 1. History: Did you visit this site? We probably mapped it.
-     * 2. Regex: Does the window title basically look like a website?
-     * 3. Branding: Is it a famous service like "Gmail"?
-     * 4. Downloader: If we know the domain but have no icon, so it will snatch it from the web.
+     * This is the brain. It figures out what icon goes with which window.
+     * 1. Check browser history (Did you visit this?)
+     * 2. Try to guess domain from title (regex magic)
+     * 3. Keyword matching (e.g. "Gmail" -> mail.google.com)
+     * 4. If we know the domain but have no icon -> Download it!
      */
     function getFavicon(window) {
         if (!window || !window.title) return "";
@@ -127,27 +117,20 @@ Singleton {
             }
         }
 
-        // If we still don't have a domain here, we give up
         if (!domain) return "";
 
         // Clean up common aliases to use our official icons
         if (domain === "gmail.com") domain = "mail.google.com";
         if (domain === "gemini.ai") domain = "gemini.google.com";
         
-        // Priority 1: Check if we have an "Official" high-quality icon
-        const officialPath = "file://" + shellDir + "/assets/google/" + domain + ".png";
-        if (readyDomains[domain + "_official"] || root.officialDomains.includes(domain)) {
-             return officialPath;
-        }
-
-        // Priority 2: Use the downloaded icon if we have one
+        // Priority 1: Do we have it cached already?
         if (readyDomains[domain]) {
             const ext = readyDomains[domain + "_svg"] ? ".svg" : ".png";
             return "file://" + rawCacheDir + "/" + domain + ext;
         }
         
-        // Priority 3: If we have a domain but no icon, go pull it from the web
-        if (!downloading[domain] && !failedDomains[domain] && !root.officialDomains.includes(domain)) {
+        // Priority 2: If we have a domain but no icon, go pull it from the web
+        if (!downloading[domain] && !failedDomains[domain]) {
             downloadFavicon(domain, fullUrl);
         }
 
@@ -155,8 +138,7 @@ Singleton {
         const parts = domain.split(".");
         if (parts.length > 2) {
             const parent = parts.slice(-2).join(".");
-            if (parent !== domain && (readyDomains[parent] || readyDomains[parent + "_official"])) {
-                if (readyDomains[parent + "_official"]) return "file://" + shellDir + "/assets/google/" + parent + ".png";
+            if (parent !== domain && readyDomains[parent]) {
                 const parentExt = readyDomains[parent + "_svg"] ? ".svg" : ".png";
                 return "file://" + rawCacheDir + "/" + parent + parentExt;
             }
@@ -201,7 +183,6 @@ Singleton {
         newDown[domain] = Date.now();
         root.downloading = newDown;
         
-        // The reason the directory is like this, so it would look organized for your shell
         const scriptPath = shellDir + "/scripts/favicons/download_favicon.sh"; // You may change as the way you want
         const targetUrl = scrapeUrl || "";
         
@@ -278,11 +259,11 @@ Singleton {
     // Clean up old crap and see what's currently in the cache
     function startupScan() {
         const cleanup = cleanupProcess.createObject(null, {
-            command: ["bash", "-c", `find "${rawCacheDir}" -name "*.png" -not -name ".tmp_*" -type f | while read f; do head -c 5 "$f" | grep -qiE "^(<svg|<\\?xml)" && rm -f "$f" && continue; fsize=$(stat -c%s "$f" 2>/dev/null || echo 0); [ "$fsize" -le 400 ] && rm -f "$f"; done; for d in mail.google.com calendar.google.com drive.google.com docs.google.com sheets.google.com slides.google.com meet.google.com maps.google.com gemini.google.com youtube.com aistudio.google.com notebooklm.google.com photos.google.com m3.material.io; do rm -f "${rawCacheDir}/$d.png"; done`]
+            command: ["bash", "-c", `find "${rawCacheDir}" -name "*.png" -not -name ".tmp_*" -type f | while read f; do head -c 5 "$f" | grep -qiE "^(<svg|<\\?xml)" && rm -f "$f" && continue; fsize=$(stat -c%s "$f" 2>/dev/null || echo 0); [ "$fsize" -le 400 ] && rm -f "$f"; done`]
         });
         cleanup.onExited.connect(() => {
             const scan = scanProcess.createObject(null, {
-                command: ["bash", "-c", `ls "${rawCacheDir}" 2>/dev/null; echo "---OFFICIAL---"; ls "${shellDir}/assets/google" 2>/dev/null`]
+                command: ["bash", "-c", `ls "${rawCacheDir}" 2>/dev/null`]
             });
             scan.stdout.onStreamFinished.connect(() => {
                 const output = scan.stdout.text.trim();
@@ -290,18 +271,14 @@ Singleton {
                 
                 const lines = output.split("\n");
                 let temp = {};
-                let isOfficial = false;
                 for (const line of lines) {
                     const f = line.trim();
                     if (!f) continue;
-                    if (f === "---OFFICIAL---") {
-                        isOfficial = true;
-                        continue;
-                    }
+                    
                     if (f.endsWith(".png") && f.length > 4) {
                         const domain = f.replace(".png", "");
-                        temp[isOfficial ? domain + "_official" : domain] = true;
-                    } else if (!isOfficial && f.endsWith(".svg") && f.length > 4) {
+                        temp[domain] = true;
+                    } else if (f.endsWith(".svg") && f.length > 4) {
                         const domain = f.replace(".svg", "");
                         temp[domain] = true;
                         temp[domain + "_svg"] = true; 

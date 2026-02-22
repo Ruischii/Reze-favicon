@@ -19,7 +19,7 @@ PWAs are okay but making one for every site is a bloated solution. This project 
 
 It uses a few Tiers to make sure you get the right icon:
 
-1. **Official Assets**: Hardcoded icons for stuff like Gmail, Drive, YouTube. 100% accurate. (you can add your own things)
+1. **Google's Icons**: For core services like Gmail, Drive or Calendar, the downloader script fetches from Google's API.
 2. **Browser History**: A python script scans your browser history and maps window titles to real URLs.
 3. **Regex Fallback**: If history fails, it looks for domain names directly in the window title.
    - *Note: This is where "hallucinations" can happen. If a title is "meeting.notes", the regex might think "notes.com" is the domain. It's not perfect but I think it should be good enough for most cases.*
@@ -50,7 +50,7 @@ qs -p /path/to/quickshell-favicon
 
 ## Integration
 
-1.  **Copy the folders**: Grab `services/`, `scripts/`, and `assets/` and put them in your project.
+1.  **Copy the folders**: Grab `services/` and `scripts/` and put them in your project.
 2.  **Import**: `import "./services" as Services`
 3.  **The Property**: Add this to your bar or dock item. We use `cacheCounter` to make the UI update instantly when a new icon is downloaded!
     ```qml
@@ -70,29 +70,6 @@ qs -p /path/to/quickshell-favicon
 *Check out `components/FaviconDockItem.qml` for a full example including system icon fallbacks and browser detection.*
 
 ## Customize 
-
-### Adding your own Official Assets
-If you want to use your own high-quality icons and skip the download process:
-
-1.  **Drop your icon**: Put a `.png` file named exactly after the domain (e.g. `github.com.png`) into a folder. You can use any folder, it doesn't have to be `assets/google/`.
-2.  **Define your path** (Optional): In `services/FaviconService.qml`, you can add your own property to point to your new folder:
-    ```qml
-    readonly property string myIcons: "file://" + shellDir + "/your-custom-folder/"
-    ```
-3.  **Blacklist the domain**: Add the domain to the `officialDomains` list in `FaviconService.qml`. This tells the service: *"I have this locally, don't try to download it."*
-    ```qml
-    readonly property var officialDomains: [
-        "github.com", "your-other-site.com",
-        "mail.google.com", "calendar.google.com", ...
-    ]
-    ```
-4.  **Update the Logic**: In the `getFavicon` function, point the `officialPath` to your new folder:
-    ```qml
-    const officialPath = root.myIcons + domain + ".png"; // or root.shellDir + "/assets/google/" 
-    if (root.officialDomains.includes(domain)) {
-         return officialPath;
-    }
-    ```
 
 ### Changing the Cache Folder
 By default, downloaded icons and search maps are stored in `~/.cache/quickshell/favicons`. If you want to move this:

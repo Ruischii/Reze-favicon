@@ -47,8 +47,42 @@ validate_svg() {
     return 0
 }
 
-# ─── Source 1: The fast and reliable Vemetric API ────────────────
-# We prioritize high-quality icons first, then fall back to HTML scraping since those icons are often only 16x16.
+# ─── Hardcoded Google Assets ─────────────────────────────────────
+# We hardcode some mainstream Google sites so they never stray away
+# from their official high-resolution branding
+# this because sometime it fallback to random "G" icon
+HQ_URL=""
+case "$DOMAIN" in
+    "mail.google.com")      HQ_URL="https://www.gstatic.com/images/branding/productlogos/gmail_2020q4/v11/192px.svg" ;;
+    "calendar.google.com")  HQ_URL="https://www.gstatic.com/images/branding/productlogos/calendar_2020q4/v13/192px.svg" ;;
+    "drive.google.com")     HQ_URL="https://www.gstatic.com/images/branding/productlogos/drive_2020q4/v10/192px.svg" ;;
+    "docs.google.com")      HQ_URL="https://www.gstatic.com/images/branding/productlogos/docs_2020q4/v12/192px.svg" ;;
+    "sheets.google.com")    HQ_URL="https://www.gstatic.com/images/branding/productlogos/sheets_2020q4/v11/192px.svg" ;;
+    "slides.google.com")    HQ_URL="https://www.gstatic.com/images/branding/productlogos/slides_2020q4/v12/192px.svg" ;;
+    "notebooklm.google.com") HQ_URL="https://www.gstatic.com/images/branding/productlogos/notebooklm/v1/192px.svg" ;;
+esac
+
+if [ -n "$HQ_URL" ]; then
+    curl -f -L -s --max-time 10 "$HQ_URL" -o "${TMP_PATH}.svg" 2>/dev/null
+    validate_svg && mv "${TMP_PATH}.svg" "$FINAL_SVG" && exit 0
+    rm -f "${TMP_PATH}.svg"
+fi
+
+# ─── Source 1: Google's s2 Favicon API ───────────────────────────
+# Super fast and covers 99% (made up number) of the web
+curl -f -L -s --max-time 10 "https://www.google.com/s2/favicons?domain=${DOMAIN}&sz=128" -o "${TMP_PATH}.png" 2>/dev/null
+if validate_png; then
+    # Google likes to return a generic "globe" if it doesn't know the site.
+    # We'd rather keep digging for a real icon if that happens.
+    fsize=$(stat -c%s "${TMP_PATH}.png")
+    if [ "$fsize" -ne 1215 ] && [ "$fsize" -ne 529 ]; then
+        mv "${TMP_PATH}.png" "$FINAL_PATH" && exit 0
+    fi
+    rm -f "${TMP_PATH}.png"
+fi
+
+# ─── Source 2: Vemetric API ──────────────────────────────────────
+# A great fallback that often has high-res SVGs
 curl -f -L -s --max-time 10 "https://favicon.vemetric.com/${DOMAIN}?size=128" -o "${TMP_PATH}.raw" 2>/dev/null
 if [ -f "${TMP_PATH}.raw" ]; then
     if head -c 10 "${TMP_PATH}.raw" | grep -qiE "^(<svg|<\?xml)"; then
@@ -67,7 +101,7 @@ if [ -f "${TMP_PATH}.raw" ]; then
     fi
 fi
 
-# ─── Source 2: Digging through the page HTML ─────────────────────
+# ─── Source 3: Digging through the page HTML ─────────────────────
 # We look for <link rel="icon"...> tags
 TARGET_URL="${SCRAPE_URL:-https://${DOMAIN}}"
 html_icon=$(curl -k -f -L -s --max-time 10 "$TARGET_URL" 2>/dev/null | python3 -c "
