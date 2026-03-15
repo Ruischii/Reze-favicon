@@ -7,53 +7,31 @@ from pathlib import Path
 import re
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
-"""
-You may read this script to understand how it works
-while it is not priority to understand this script
-since this just going to blast your browser history to a json file
-and the FaviconService.qml is going to do the heavy lifting
-"""
+HOME = Path.home()
 
-def get_browser_history_paths():
-    """Finds where your browsers hide their history files."""
-    home = str(Path.home())
-    paths = []
-    
-    # Common places where browsers live
-    bases = [
-        os.path.join(home, ".config"),
-        os.path.join(home, ".mozilla"),
-        os.path.join(home, "snap"),
-        os.path.join(home, ".var/app")
-    ]
-    
-    for base in bases:
-        if not os.path.exists(base):
-            continue
-            
-        for root, dirs, files in os.walk(base):
-            # Chromium-based (Chrome, Brave, Edge, etc.)
-            if "History" in files:
-                p = os.path.join(root, "History")
-                parent = root.lower()
-                if any(x in parent for x in ["chrome", "brave", "chromium", "edge", "vivaldi", "thorium", "opera", "yandex"]):
-                    paths.append(("chromium", p))
-            
-            # Firefox-based (Firefox, Zen, Librewolf, etc.)
-            if "places.sqlite" in files:
-                p = os.path.join(root, "places.sqlite")
-                parent = root.lower()
-                if any(x in parent for x in ["firefox", "mozilla", "zen", "floorp", "waterfox", "librewolf"]):
-                    paths.append(("firefox", p))
-                    
-            # Speed boost: Don't dig too deep into random folders
-            if len(root.split(os.sep)) - len(base.split(os.sep)) > 5:
-                del dirs[:]
+# Known browser history locations (fast, no filesystem crawling)
+BROWSER_PATHS = [
+    ("chromium", HOME / ".config/google-chrome/Default/History"),
+    ("chromium", HOME / ".config/chromium/Default/History"),
+    ("chromium", HOME / ".config/BraveSoftware/Brave-Browser/Default/History"),
+    ("chromium", HOME / ".config/microsoft-edge/Default/History"),
+    ("chromium", HOME / ".config/vivaldi/Default/History"),
+    ("chromium", HOME / ".config/opera/History"),
+    ("chromium", HOME / ".config/thorium/Default/History"),
+    ("chromium", HOME / ".config/yandex-browser/Default/History"),
 
-    return list(set(paths))
+    ("firefox", HOME / ".mozilla/firefox"),
+]
 
-# We need to strip browser names from titles so they match what QML's FaviconService expects
+CACHE_DIR = Path("~/.cache/quickshell/favicons").expanduser()
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+OUTPUT_FILE = CACHE_DIR / "exact_title_to_url.json"
+
+
+# Remove browser suffixes from titles
 BROWSER_SUFFIX = re.compile(
     r"\s*[-|—|·]\s*(Mozilla Firefox|Brave|Google Chrome|Chromium|Vivaldi|Edge|"
     r"Zen|Floorp|LibreWolf|Thorium|Waterfox|Mullvad|Tor Browser|"
@@ -61,79 +39,149 @@ BROWSER_SUFFIX = re.compile(
     re.IGNORECASE
 )
 
-def clean_title(raw_title):
-    """Turns 'YouTube - Mozilla Firefox' into just 'YouTube'."""
-    if not raw_title:
+
+def clean_title(title: str | None):
+    if not title:
         return None
-    clean = BROWSER_SUFFIX.sub("", raw_title).strip()
-    return clean if clean else None
 
-def extract_exact_mappings():
-    """The heavy lifting: mapping your window titles to actual URLs from your history."""
-    title_to_url = {}
-    history_paths = get_browser_history_paths()
-    
-    if not history_paths:
-        return title_to_url
+    title = BROWSER_SUFFIX.sub("", title).strip()
 
-    for db_type, path in history_paths:
-        tmp_path = None
+    # remove counters like "(3)"
+    title = re.sub(r"\(\d+\)$", "", title).strip()
+
+    return title or None
+
+
+def copy_db(path: Path):
+    """Copy DB safely to temp file."""
+    try:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        tmp.close()
+
+        shutil.copy2(path, tmp.name)
+
+        for suffix in ("-wal", "-shm"):
+            sidecar = path.with_suffix(path.suffix + suffix)
+            if sidecar.exists():
+                shutil.copy2(sidecar, tmp.name + suffix)
+
+        return tmp.name
+
+    except Exception:
+        return None
+
+
+def extract_chromium(path: Path):
+    mappings = {}
+
+    tmp = copy_db(path)
+    if not tmp:
+        return mappings
+
+    try:
+        conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT title, url
+            FROM urls
+            WHERE title IS NOT NULL
+            ORDER BY last_visit_time DESC
+            LIMIT 5000
+        """)
+
+        for title, url in cur.fetchall():
+            t = clean_title(title)
+            if t and t not in mappings:
+                mappings[t] = url
+
+        conn.close()
+
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+
+    finally:
         try:
-            # We copy the database to a temp file so we don't lock your browser if it's open
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
-                tmp_path = tmp.name
-            shutil.copy2(path, tmp_path)
-            
-            # Firefox is picky and needs its sidecar files to read the latest data
-            for sidecar_suffix in ["-wal", "-shm"]:
-                sidecar_path = path + sidecar_suffix
-                if os.path.exists(sidecar_path):
-                    shutil.copy2(sidecar_path, tmp_path + sidecar_suffix)
-            
-            # Open the temp database
-            conn = sqlite3.connect(f"file:{tmp_path}?mode=ro", uri=True)
-            cursor = conn.cursor()
-            
-            # Grab the last 5000 sites you visited
-            if db_type == "chromium":
-                cursor.execute("SELECT title, url FROM urls ORDER BY last_visit_time DESC LIMIT 5000")
-            else:
-                cursor.execute("SELECT title, url FROM moz_places WHERE title IS NOT NULL ORDER BY last_visit_date DESC LIMIT 5000")
-            
-            rows = cursor.fetchall()
-            
-            for title, url in rows:
-                cleaned = clean_title(title)
-                if cleaned and cleaned not in title_to_url:
-                    title_to_url[cleaned] = url
-            
-            conn.close()
-            
-        except Exception as e:
-            # If something breaks, we'll see it in the terminal
-            traceback.print_exc(file=sys.stderr)
-        finally:
-            # Clean up our temp files so we don't leave a mess behind
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                    for sidecar_suffix in ["-wal", "-shm"]:
-                        sidecar_to_rm = tmp_path + sidecar_suffix
-                        if os.path.exists(sidecar_to_rm):
-                            os.unlink(sidecar_to_rm)
-                except:
-                    pass
+            os.unlink(tmp)
+        except:
+            pass
 
-    return title_to_url
+    return mappings
+
+
+def extract_firefox(profile_dir: Path):
+    mappings = {}
+
+    for profile in profile_dir.glob("*.default*"):
+        db = profile / "places.sqlite"
+        if not db.exists():
+            continue
+
+        tmp = copy_db(db)
+        if not tmp:
+            continue
+
+        try:
+            conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+            cur = conn.cursor()
+
+            cur.execute("""
+                SELECT title, url
+                FROM moz_places
+                WHERE title IS NOT NULL
+                ORDER BY last_visit_date DESC
+                LIMIT 5000
+            """)
+
+            for title, url in cur.fetchall():
+                t = clean_title(title)
+                if t and t not in mappings:
+                    mappings[t] = url
+
+            conn.close()
+
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+
+        finally:
+            try:
+                os.unlink(tmp)
+            except:
+                pass
+
+    return mappings
+
+
+def extract_all():
+    mappings = {}
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+
+        for t, p in BROWSER_PATHS:
+            if t == "chromium" and p.exists():
+                futures.append(executor.submit(extract_chromium, p))
+
+            elif t == "firefox" and p.exists():
+                futures.append(executor.submit(extract_firefox, p))
+
+        for f in futures:
+            try:
+                mappings.update(f.result())
+            except Exception:
+                pass
+
+    return mappings
+
+
+def main():
+    mappings = extract_all()
+
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(mappings, f, indent=2)
+
+    print(f"Saved {len(mappings)} mappings → {OUTPUT_FILE}")
+
 
 if __name__ == "__main__":
-    # Extraction brrrr
-    mappings = extract_exact_mappings()
-    
-    # If you changed the cache directory in FaviconService.qml, change it here too
-    cache_dir = os.path.expanduser("~/.cache/quickshell/favicons")
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    out_path = os.path.join(cache_dir, "exact_title_to_url.json")
-    with open(out_path, "w") as f:
-        json.dump(mappings, f, indent=2)
+    main()
